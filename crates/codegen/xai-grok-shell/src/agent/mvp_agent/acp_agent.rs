@@ -223,10 +223,16 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
+        // A user-configured custom inference endpoint (GROK_MODELS_BASE_URL /
+        // [endpoints].models_base_url) authenticates itself (or needs no auth),
+        // so advertise API-key auth as the eager, non-interactive method even
+        // when no XAI_API_KEY is set. This routes the whole login flow through
+        // the api-key path — no browser sign-in wizard, headless auth succeeds,
+        // and session creation gets an auth_method_id — with keyless requests.
         let has_external_api_key = auth_method::should_advertise_xai_api_key(
             disable_api_key_auth,
             self.models_manager.models().values(),
-        );
+        ) || (!disable_api_key_auth && self.cfg.borrow().endpoints.has_custom_endpoint());
         let init_has_current = self.auth_manager.current().is_some();
         let init_is_expired = self.auth_manager.is_expired();
         xai_grok_telemetry::unified_log::info(
@@ -496,11 +502,12 @@ impl acp::Agent for MvpAgent {
                                 Some(serde_json::json!({ "error" : e.to_string() })),
                             );
                         }
-                    } else if !self
-                        .models_manager
-                        .models()
-                        .values()
-                        .any(|m| m.has_own_credentials())
+                    } else if !self.cfg.borrow().endpoints.has_custom_endpoint()
+                        && !self
+                            .models_manager
+                            .models()
+                            .values()
+                            .any(|m| m.has_own_credentials())
                     {
                         emit_login_span(false, "api_key", None, Some("no_credentials"));
                         return Err(
@@ -510,6 +517,8 @@ impl acp::Agent for MvpAgent {
                                 ),
                         );
                     }
+                    // Custom endpoint with no key: proceed keyless — the sampler
+                    // talks to the endpoint's own base_url with no bearer.
                 }
                 self.set_auth_method(arguments.method_id.clone());
                 self.ensure_telemetry_client();

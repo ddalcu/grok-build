@@ -35,6 +35,39 @@ runtime. It is synced periodically from the SpaceXAI monorepo.
 
 ---
 
+> [!NOTE]
+> ## About this fork
+>
+> This fork makes it easy to run SpaceXAI's Grok Build against a **local /
+> self-hosted, OpenAI-compatible LLM** — llama.cpp, Ollama, LM Studio,
+> MLX-serve, and the like — with **no Grok account and no API key**.
+>
+> **On first launch**, if you're not signed in, grok asks:
+>
+> ```text
+> Paste a local model URL (e.g. http://localhost:11434/v1),
+> or press Enter to sign in with Grok:
+> ```
+>
+> Paste your endpoint and you're running (it's saved to `config.toml`, so you're
+> only asked once). Or point it there directly at any time:
+>
+> ```sh
+> export GROK_MODELS_BASE_URL="http://localhost:11434/v1"   # your server's /v1 base
+> grok                                                      # or: grok -m <model-id>
+> ```
+>
+> Grok reads the model list — and each model's **context length** — from
+> `<base_url>/models`, needs no key or browser sign-in, and switches models with
+> `Ctrl+M`. To pin a single model or override its context window, see the
+> [Custom Models guide](crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md).
+>
+> This fork also publishes **nightly, per-commit release builds** (macOS Apple
+> Silicon + Linux x86_64) — grab a binary from the
+> [Releases](https://github.com/ddalcu/grok-build/releases) page.
+>
+> Everything below is upstream documentation and applies unchanged.
+
 ## Installing the released binary
 
 Prebuilt binaries are published for macOS, Linux, and Windows:

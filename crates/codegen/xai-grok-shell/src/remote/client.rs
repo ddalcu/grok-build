@@ -667,6 +667,11 @@ struct ModelsResponse {
 enum EndpointAuth {
     ApiKey,
     Session,
+    /// A user-configured custom `/v1/models` endpoint (self-hosted / local).
+    /// Sends the API key as a Bearer when one is configured, but proceeds
+    /// unauthenticated when none is set — such servers authenticate themselves
+    /// or need no auth, so a missing `XAI_API_KEY` must not block the fetch.
+    CustomEndpoint,
 }
 struct ListModelsEndpoint {
     url: String,
@@ -691,7 +696,7 @@ impl ListModelsEndpoint {
         if endpoints.has_custom_endpoint() {
             Self {
                 url: endpoints.resolve_models_list_url(),
-                auth: EndpointAuth::ApiKey,
+                auth: EndpointAuth::CustomEndpoint,
             }
         } else if fetch_auth == crate::agent::models::ModelFetchAuth::ApiKey {
             Self {
@@ -735,6 +740,16 @@ pub(crate) fn fetch_models_blocking(
                     )
                 })?;
             request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+        EndpointAuth::CustomEndpoint => {
+            // Attach the API key if one is configured; otherwise fetch
+            // unauthenticated (self-hosted servers ignore/omit auth).
+            if let Some(api_key) = crate::agent::auth_method::read_xai_api_key_env()
+                .ok()
+                .or_else(|| auth.map(|a| a.key.clone()))
+            {
+                request = request.header("Authorization", format!("Bearer {}", api_key));
+            }
         }
         EndpointAuth::Session => {
             let auth = auth.ok_or_else(|| {
@@ -794,6 +809,26 @@ pub fn parse_remote_model_value(
 ) -> Option<crate::agent::config::ModelEntryConfig> {
     let obj = value.as_object()?;
     let meta = obj.get("_meta").and_then(|v| v.as_object());
+    // OpenAI-compatible inference servers (mlx-serve, some llama.cpp builds,
+    // ...) advertise the usable context length under a plain `meta` object
+    // rather than xAI's `_meta`, and call it `context_length`.
+    let oai_meta = obj.get("meta").and_then(|v| v.as_object());
+    // Skip non-chat entries (image / audio / embeddings, ...) that servers like
+    // mlx-serve list alongside chat models: they must not appear in the model
+    // picker. When the server advertises `capabilities` and none of them is a
+    // chat-style capability, drop the entry. Servers that don't send
+    // `capabilities` (llama.cpp, Ollama, ...) are left untouched (assume chat).
+    if let Some(caps) = obj.get("capabilities").and_then(|v| v.as_array()) {
+        let chatty = caps.iter().filter_map(|c| c.as_str()).any(|c| {
+            matches!(
+                c,
+                "chat" | "completion" | "completions" | "tool_use" | "text"
+            )
+        });
+        if !chatty {
+            return None;
+        }
+    }
     let id = get_string(obj, "id");
     let model = get_string(obj, "model")
         .or_else(|| get_string(obj, "modelId"))
@@ -804,10 +839,18 @@ pub fn parse_remote_model_value(
         .or_else(|| get_string(obj, "base_url"))
         .unwrap_or_else(|| default_base_url.to_owned());
     let name = get_string(obj, "name").or_else(|| Some(model.clone()));
-    let context_window = get_u64(obj, "contextWindow")
-        .or_else(|| get_u64(obj, "context_window"))
-        .or_else(|| meta.and_then(|m| get_u64(m, "contextWindow")))
-        .or_else(|| meta.and_then(|m| get_u64(m, "totalContextTokens")))
+    // Treat 0 as "unknown" at every level so a chat model that reports
+    // `context_length: 0` (e.g. not yet loaded) still resolves to the default
+    // window instead of being dropped, and a real value elsewhere in the chain
+    // isn't shadowed by a leading 0.
+    let pos = |o: Option<u64>| o.filter(|&n| n > 0);
+    let context_window = pos(get_u64(obj, "contextWindow"))
+        .or_else(|| pos(get_u64(obj, "context_window")))
+        .or_else(|| pos(get_u64(obj, "context_length")))
+        .or_else(|| pos(meta.and_then(|m| get_u64(m, "contextWindow"))))
+        .or_else(|| pos(meta.and_then(|m| get_u64(m, "totalContextTokens"))))
+        .or_else(|| pos(oai_meta.and_then(|m| get_u64(m, "context_length"))))
+        .or_else(|| pos(oai_meta.and_then(|m| get_u64(m, "contextLength"))))
         .unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_window = std::num::NonZeroU64::new(context_window)?;
     let agent_type = get_string(obj, "systemPromptType")

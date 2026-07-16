@@ -373,6 +373,106 @@ fn resolve_hunk_tracker_mode(
         .find(|s| !s.is_empty())
         .map(str::to_owned)
 }
+/// Persist `[endpoints] models_base_url` to `~/.grok/config.toml` via
+/// `toml_edit` (preserving comments), so a locally-entered endpoint is
+/// remembered across launches.
+fn persist_models_base_url(url: &str) -> std::io::Result<()> {
+    let path = xai_grok_shell::util::config::user_config_path();
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("config.toml is not valid TOML: {e}"),
+        )
+    })?;
+    let endpoints = doc
+        .entry("endpoints")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let tbl = endpoints.as_table_mut().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "[endpoints] is not a table",
+        )
+    })?;
+    tbl["models_base_url"] = toml_edit::value(url);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, doc.to_string())
+}
+
+/// First-launch onboarding. When stdin/stdout are a TTY and there's no Grok
+/// session, no `XAI_API_KEY`, and no configured inference endpoint, offer to
+/// point grok at a local / self-hosted OpenAI-compatible endpoint (used with no
+/// account) or press Enter to sign in with Grok. On a URL, it sets
+/// `GROK_LOCAL`-equivalent state — `GROK_MODELS_BASE_URL` for this process plus
+/// a persisted `[endpoints] models_base_url` — so the endpoint is active this
+/// launch and remembered next time. No-op in every non-first-launch case.
+///
+/// Runs before the agent connects (and before the model prefetch), so the
+/// chosen endpoint takes effect without a restart. `has_session` is whether a
+/// signed-in Grok session was found (skip the prompt when true).
+fn maybe_prompt_local_endpoint(raw_config: &toml::Value, has_session: bool) {
+    use std::io::{IsTerminal, Write};
+
+    // Only on a genuinely interactive launch (not ACP/stdio, not piped input).
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return;
+    }
+    // Already signed in, already pointed at an endpoint (env), or authed by key.
+    if has_session
+        || std::env::var_os("GROK_MODELS_BASE_URL").is_some()
+        || xai_grok_shell::agent::auth_method::has_xai_api_key_env()
+    {
+        return;
+    }
+    // A custom endpoint already configured in config.toml.
+    match xai_grok_shell::agent::config::Config::new_from_toml_cfg(raw_config) {
+        Ok(c) if c.endpoints.has_custom_endpoint() => return,
+        Ok(_) => {}
+        Err(_) => return,
+    }
+
+    println!();
+    println!("No Grok session found. You can run a local / self-hosted model");
+    println!("(llama.cpp, Ollama, LM Studio, MLX-serve, …) with no account,");
+    println!("or sign in with Grok.");
+    println!();
+    println!("Paste a local model URL (e.g. http://localhost:11434/v1),");
+    print!("or press Enter to sign in with Grok: ");
+    let _ = std::io::stdout().flush();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return;
+    }
+    let url = line.trim();
+    if url.is_empty() {
+        return; // → sign in with Grok (normal startup)
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        println!("\"{url}\" doesn't look like a URL — continuing to Grok sign-in.");
+        return;
+    }
+
+    // SAFETY: startup runs this before spawning the prefetch / agent that read
+    // endpoints; no other thread is reading the environment at this point.
+    // (Rust 2024 requires `unsafe` for `set_var`.)
+    unsafe {
+        std::env::set_var("GROK_MODELS_BASE_URL", url);
+    }
+    match persist_models_base_url(url) {
+        Ok(()) => println!("\nUsing local model at {url} (saved to config.toml).\n"),
+        Err(e) => {
+            eprintln!("\nUsing {url} for this session (couldn't save to config.toml: {e}).\n")
+        }
+    }
+}
+
 /// Main entry point: connect to agent, init terminal, run event loop, restore.
 ///
 /// If a session ID is provided via `--resume` / `--load` / `--continue`, the
@@ -404,6 +504,9 @@ pub async fn run(
             }
         };
     let refreshed_auth = xai_grok_shell::auth::try_ensure_fresh_auth(&grok_com_config).await;
+    // First-launch onboarding: ask whether to use a local endpoint or sign in
+    // with Grok — before the model prefetch reads the endpoints.
+    maybe_prompt_local_endpoint(&raw_config, refreshed_auth.is_some());
     let early_prefetch =
         xai_grok_shell::agent::models::start_early_prefetch_with_auth(refreshed_auth);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
