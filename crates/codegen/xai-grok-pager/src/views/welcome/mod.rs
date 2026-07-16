@@ -1699,9 +1699,11 @@ fn render_welcome_done(
     } else {
         0
     };
-    // Changelog is reachable via this menu row (ctrl+l). Show from the first
-    // frame so the menu doesn't shift while the CDN fetch completes.
-    let show_changelog_action = p.has_access && !show_picker;
+    // Changelog is reachable via this menu row (ctrl+l), shown only when there
+    // are changelog bullets to open — so a custom / local inference endpoint
+    // (which skips the Grok changelog fetch) doesn't get a dead "Changelog" row.
+    let show_changelog_action =
+        p.has_access && !show_picker && !p.changelog_bullets.is_empty();
 
     let gate_menu;
     let owned_menu;

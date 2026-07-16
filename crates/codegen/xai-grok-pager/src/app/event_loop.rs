@@ -50,6 +50,26 @@ pub(crate) struct RunResult {
     pub relaunch: Option<super::app_view::ScreenModeRelaunch>,
 }
 
+/// Whether grok is pointed at a custom / local inference endpoint
+/// (`GROK_MODELS_BASE_URL` / `[endpoints].models_base_url`, or the list-URL
+/// override). Checks the env first (covers a just-entered onboarding URL) then
+/// the persisted config (covers returning launches). Used to suppress the
+/// Grok-specific changelog on the welcome screen for local models.
+fn using_custom_inference_endpoint() -> bool {
+    if std::env::var_os("GROK_MODELS_BASE_URL").is_some()
+        || std::env::var_os("GROK_MODELS_LIST_URL").is_some()
+    {
+        return true;
+    }
+    xai_grok_shell::config::load_effective_config()
+        .ok()
+        .and_then(|c| {
+            let ep = c.get("endpoints")?.as_table()?;
+            Some(ep.contains_key("models_base_url") || ep.contains_key("models_list_url"))
+        })
+        .unwrap_or(false)
+}
+
 /// In-flight reconnect re-initialization, tied to the agents whose reload
 /// windows it opened so completion lands on them even if the user switches
 /// views (or closes one) while the re-init runs.
@@ -1230,9 +1250,14 @@ pub(crate) async fn run(
         }
         // Fetch changelog off the render path so the welcome screen
         // can display bullets and /release-notes uses the cached result.
-        let effs = vec![super::actions::Effect::FetchChangelog];
-        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-            return Ok(make_run_result(&app));
+        // Skipped when pointed at a custom / local inference endpoint: the
+        // (Grok-specific) changelog doesn't apply there, and leaving the
+        // bullets empty also drops the "Changelog" welcome menu item.
+        if !using_custom_inference_endpoint() {
+            let effs = vec![super::actions::Effect::FetchChangelog];
+            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                return Ok(make_run_result(&app));
+            }
         }
         if !app.has_access() {
             gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
